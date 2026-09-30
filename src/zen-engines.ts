@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type {
-  Api,
-  Context,
-  Model,
-  ProviderHeaders,
-  SimpleStreamOptions,
-  StreamOptions,
-} from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import {
   getApiProvider,
   registerApiProvider,
@@ -14,7 +7,11 @@ import {
   type ApiStreamFunction,
   type ApiStreamSimpleFunction,
 } from "@earendil-works/pi-ai/compat";
-import { applyOpenCodeFreeHeaders } from "./zen-headers.js";
+import {
+  applyOpenCodeFreeHeaders,
+  getHeader,
+  type MutableHeaders,
+} from "./zen-headers.js";
 
 /**
  * Zen engine adapters.
@@ -114,13 +111,34 @@ export function composeZenTransformHeaders(
  * `transformHeaders` is threaded through request options by Pi core's
  * streamFn (sdk.ts) but is absent from pi-ai's public option types, hence
  * the structural read/cast here (same pattern as createZenStreamSimple).
+ *
+ * Stamping happens on TWO carriers, deliberately:
+ *
+ * 1. `options.headers` — the only field pi-ai engines actually send.
+ *    Pi core's `prepareRequest` consumes `transformHeaders` *before* the
+ *    engine is reached, so a stamp living there alone never reaches the
+ *    wire on request paths without the ambient hook (foreground
+ *    `async:false` children) — that is the leak this module exists to stop.
+ * 2. `transformHeaders` — kept for any downstream layer that does apply it,
+ *    composed with the caller's transform so nothing is dropped.
+ *
+ * The Zen adapters are only ever reached by `zen-*` models, which only this
+ * extension creates, so the identity gate is forced here instead of relying
+ * on provider config headers having survived every merge on the way.
  */
 function withZenHeaders<O>(options: O): O {
-  const parent = (
-    options as { transformHeaders?: HeaderTransform } | undefined
-  )?.transformHeaders;
+  const raw = (options ?? {}) as Record<string, unknown>;
+  const incoming = raw.headers as ProviderHeaders | undefined;
+  const headers: ProviderHeaders = { ...(incoming ?? {}) };
+  headers["x-opencode-client"] = "cli";
+  if (getHeader(headers as MutableHeaders, "x-opencode-project") === undefined) {
+    headers["x-opencode-project"] = "global";
+  }
+  applyOpenCodeFreeHeaders(headers as MutableHeaders);
+  const parent = raw.transformHeaders as HeaderTransform | undefined;
   return {
-    ...((options ?? {}) as Record<string, unknown>),
+    ...raw,
+    headers,
     transformHeaders: composeZenTransformHeaders(parent),
   } as O;
 }
@@ -133,11 +151,18 @@ export type EngineResolver = (
 > | undefined;
 
 /**
- * Builds the `{ stream, streamSimple }` pair for one Zen backend: stamp via
- * a composed `transformHeaders`, then delegate straight to the native
- * engine adapter — never to compat's top-level `stream`/`streamSimple`
- * (that would resolve the `zen-*` id back to this same wrapper and
- * recurse).
+ * Builds the `{ stream, streamSimple }` pair for one Zen backend: stamp the
+ * request headers, then delegate straight to the native engine adapter —
+ * never to compat's top-level `stream`/`streamSimple` (that would resolve
+ * the `zen-*` id back to this same wrapper and recurse).
+ *
+ * The delegated call carries a shallow model copy with the native `api`:
+ * compat's registry wraps every engine in an api guard
+ * (`model.api === api`), so handing it a `zen-*` model throws
+ * `Mismatched api: zen-openai-completions expected openai-completions` on
+ * the first token. The caller's model object is never mutated, and engines
+ * that stamp `api` onto assistant messages then record the native id — a
+ * value pi resolves without this extension loaded.
  *
  * `resolveEngine` is injectable for tests; production always uses the real
  * engine registry.
@@ -153,16 +178,18 @@ export function createZenEngineFunctions(
     }
     return engine;
   };
-  const stream: ApiStreamFunction = (
-    model: Model<Api>,
-    context: Context,
-    options?: StreamOptions,
-  ) => resolve().stream(model, context, withZenHeaders(options));
-  const streamSimple: ApiStreamSimpleFunction = (
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ) => resolve().streamSimple(model, context, withZenHeaders(options));
+  const stream: ApiStreamFunction = (model, context, options) =>
+    resolve().stream(
+      { ...model, api: nativeApi } as Model<Api>,
+      context,
+      withZenHeaders(options),
+    );
+  const streamSimple: ApiStreamSimpleFunction = (model, context, options) =>
+    resolve().streamSimple(
+      { ...model, api: nativeApi } as Model<Api>,
+      context,
+      withZenHeaders(options),
+    );
   return { stream, streamSimple };
 }
 

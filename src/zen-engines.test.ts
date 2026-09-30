@@ -103,6 +103,78 @@ test("zen engine adapters stamp and delegate on both stream and streamSimple", a
   assert.equal(parentTransformCalls, 2); // core transform runs inside the stamp
 });
 
+test("zen adapters stamp the header object engines actually send", () => {
+  // Regression: pi core consumes `transformHeaders` in prepareRequest, so a
+  // stamp living only there never reaches the engine — the adapter must
+  // stamp `options.headers` itself, with no ambient hook and no parent
+  // transform (the foreground-child path).
+  let captured: any = null;
+  const functions = createZenEngineFunctions("openai-completions", () => ({
+    stream: undefined as any,
+    streamSimple: (_m: any, _c: any, o: any) => {
+      captured = o;
+      return {} as any;
+    },
+  }));
+  const model = { api: ZEN_COMPLETIONS_API, provider: "opencode-free", id: "x" };
+
+  // Exactly what prepareRequest hands down for our traffic.
+  (functions.streamSimple as any)(
+    model,
+    [],
+    {
+      headers: {
+        Authorization: "Bearer none",
+        "x-opencode-client": "cli",
+        "x-opencode-project": "global",
+      },
+    },
+  );
+  assert.ok(captured, "engine received options");
+  const headers = captured.headers as Record<string, string | null>;
+  assert.equal(headers["x-opencode-client"], "cli");
+  assert.equal(headers["x-opencode-project"], "global");
+  assert.match(
+    headers["x-opencode-session"] as string,
+    /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/,
+  );
+  assert.match(headers["x-opencode-request"] as string, /^msg_[0-9a-f-]{36}$/);
+  assert.equal(headers["User-Agent"], "opencode/1.18.31");
+  assert.equal(headers["Authorization"], null); // never Bearer none
+  assert.ok(captured.transformHeaders); // composed transform kept too
+
+  // Identity is stamped even when the provider config headers never arrive.
+  captured = null;
+  (functions.streamSimple as any)(model, [], undefined);
+  assert.equal(captured.headers["x-opencode-client"], "cli");
+  assert.equal(captured.headers["x-opencode-project"], "global");
+  assert.equal(captured.headers["Authorization"], null);
+});
+
+test("zen adapters hand the native engine the api it was registered under", () => {
+  // Regression: compat wraps every registered engine in
+  //   (model) => model.api === api ? ... : throw `Mismatched api`
+  // so delegating the `zen-*` model verbatim threw
+  // "Mismatched api: zen-openai-completions expected openai-completions"
+  // before any request was made.
+  const seen: any[] = [];
+  const functions = createZenEngineFunctions("openai-completions", () => ({
+    stream: undefined as any,
+    streamSimple: (m: any, _c: any, o: any) => {
+      seen.push({ model: m, options: o });
+      return "delegated" as any;
+    },
+  }));
+  const model = { api: ZEN_COMPLETIONS_API, provider: "opencode-free", id: "x" };
+  assert.equal((functions.streamSimple as any)(model, [], undefined), "delegated");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].model.api, "openai-completions"); // passes compat's guard
+  assert.equal(seen[0].model.provider, "opencode-free");
+  assert.equal(seen[0].model.id, "x");
+  assert.equal(model.api, ZEN_COMPLETIONS_API); // caller's model untouched
+  assert.notEqual(seen[0].model, model);
+});
+
 test("zen engine adapters leave foreign traffic untouched", async () => {
   let captured: any = null;
   const functions = createZenEngineFunctions("google-generative-ai", () => ({

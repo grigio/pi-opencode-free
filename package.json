@@ -1,6 +1,6 @@
 {
   "name": "pi-opencode-free",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Zero-daemon, pure-passthrough native Pi extension connecting directly to OpenCode Zen API",
   "type": "module",
   "license": "GPL-3.0-or-later",
@@ -12,6 +12,9 @@
   "bugs": "https://github.com/pedrostarkealexis/pi-opencode-free/issues",
   "homepage": "https://github.com/pedrostarkealexis/pi-opencode-free#readme",
   "files": [
+    "index.ts",
+    "src",
+    "!src/*.test.*",
     "dist",
     "!dist/*.test.*",
     "!dist/**/*.map",
@@ -25,7 +28,7 @@
   ],
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./index.ts"
     ]
   },
   "scripts": {
